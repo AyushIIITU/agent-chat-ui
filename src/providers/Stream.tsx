@@ -21,6 +21,7 @@ import { LangGraphLogoSVG } from "@/components/icons/langgraph";
 import { Label } from "@/components/ui/label";
 import { ArrowRight } from "lucide-react";
 import { PasswordInput } from "@/components/ui/password-input";
+import { Textarea } from "@/components/ui/textarea";
 import { getApiKey } from "@/lib/api-key";
 import { useThreads } from "./Thread";
 import { toast } from "sonner";
@@ -41,6 +42,14 @@ const useTypedStream = useStream<
 
 type StreamContextType = ReturnType<typeof useTypedStream>;
 const StreamContext = createContext<StreamContextType | undefined>(undefined);
+
+// Agent Context for passing static runtime context
+export type AgentContextType = {
+  agentContext: Record<string, unknown>;
+  setAgentContext: (context: Record<string, unknown>) => void;
+};
+
+export const AgentContext = createContext<AgentContextType | undefined>(undefined);
 
 async function sleep(ms = 4000) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -157,6 +166,23 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     _setApiKey(key);
   };
 
+  // Agent context state - stores static context for agent invocations
+  const [agentContext, setAgentContext] = useState<Record<string, unknown>>(
+    () => {
+      try {
+        const stored = window.localStorage.getItem("lg:chat:agentContext");
+        return stored ? JSON.parse(stored) : {};
+      } catch {
+        return {};
+      }
+    }
+  );
+
+  const updateAgentContext = (context: Record<string, unknown>) => {
+    window.localStorage.setItem("lg:chat:agentContext", JSON.stringify(context));
+    setAgentContext(context);
+  };
+
   // Determine final values to use, prioritizing URL params then env vars
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
@@ -187,10 +213,44 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
               const apiUrl = formData.get("apiUrl") as string;
               const assistantId = formData.get("assistantId") as string;
               const apiKey = formData.get("apiKey") as string;
+              const contextData = formData.get("agentContext") as string;
+
+              // Parse context JSON if provided
+              let parsedContext: Record<string, unknown> = {};
+              if (contextData && contextData.trim()) {
+                try {
+                  parsedContext = JSON.parse(contextData);
+                } catch {
+                  toast.error("Invalid context JSON", {
+                    description: "Please ensure the context is valid JSON format.",
+                    duration: 5000,
+                  });
+                  return;
+                }
+              }
+              
+              // Validate required field - user_id is ALWAYS required
+              if (!parsedContext.user_id) {
+                toast.error("Missing required field", {
+                  description: "The 'user_id' field is required in the agent context.",
+                  duration: 5000,
+                });
+                return;
+              }
+              
+              // Validate role if provided
+              if (parsedContext.role && parsedContext.role !== "user" && parsedContext.role !== "admin") {
+                toast.error("Invalid role value", {
+                  description: "The 'role' field must be either 'user' or 'admin'.",
+                  duration: 5000,
+                });
+                return;
+              }
 
               setApiUrl(apiUrl);
               setApiKey(apiKey);
               setAssistantId(assistantId);
+              updateAgentContext(parsedContext);
 
               form.reset();
             }}
@@ -248,6 +308,33 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
               />
             </div>
 
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="agentContext">
+                Agent Context<span className="text-rose-500">*</span>
+              </Label>
+              <p className="text-muted-foreground text-sm">
+                Provide static runtime context as JSON. This context will be
+                passed to your agent on every invocation. Required field:
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">user_id</code>.
+                Optional fields:
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">model</code>,
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">role</code> ("user" or "admin")
+              </p>
+              <Textarea
+                id="agentContext"
+                name="agentContext"
+                className="bg-background font-mono text-sm"
+                placeholder='{"user_id": "user_123", "model": "gpt-4o-mini", "role": "user"}'
+                defaultValue={
+                  Object.keys(agentContext).length > 0
+                    ? JSON.stringify(agentContext, null, 2)
+                    : '{"user_id": ""}'
+                }
+                rows={5}
+                required
+              />
+            </div>
+
             <div className="mt-2 flex justify-end">
               <Button
                 type="submit"
@@ -264,13 +351,15 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
   }
 
   return (
-    <StreamSession
-      apiKey={apiKey}
-      apiUrl={apiUrl}
-      assistantId={assistantId}
-    >
-      {children}
-    </StreamSession>
+    <AgentContext.Provider value={{ agentContext, setAgentContext: updateAgentContext }}>
+      <StreamSession
+        apiKey={apiKey}
+        apiUrl={apiUrl}
+        assistantId={assistantId}
+      >
+        {children}
+      </StreamSession>
+    </AgentContext.Provider>
   );
 };
 
@@ -279,6 +368,15 @@ export const useStreamContext = (): StreamContextType => {
   const context = useContext(StreamContext);
   if (context === undefined) {
     throw new Error("useStreamContext must be used within a StreamProvider");
+  }
+  return context;
+};
+
+// Create a custom hook to use the agent context
+export const useAgentContext = (): AgentContextType => {
+  const context = useContext(AgentContext);
+  if (context === undefined) {
+    throw new Error("useAgentContext must be used within a StreamProvider");
   }
   return context;
 };

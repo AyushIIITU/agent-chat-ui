@@ -2,7 +2,10 @@ import { v4 as uuidv4 } from "uuid";
 import { ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
-import { useStreamContext } from "@/providers/Stream";
+import {
+  useStreamContext,
+  useAgentContext,
+} from "@/providers/Stream";
 import { useState, FormEvent } from "react";
 import { Button } from "../ui/button";
 import { Checkpoint, Message } from "@langchain/langgraph-sdk";
@@ -45,6 +48,7 @@ import {
   ArtifactTitle,
   useArtifactContext,
 } from "./artifact";
+import { AgentContextManager } from "../agent-context-manager";
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -139,6 +143,7 @@ export function Thread() {
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
   const stream = useStreamContext();
+  const { agentContext } = useAgentContext();
   const messages = stream.messages;
   const isLoading = stream.isLoading;
 
@@ -211,18 +216,34 @@ export function Thread() {
 
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
 
-    const context =
-      Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
+    // Merge agent context with artifact context
+    const context = {
+      ...agentContext,
+      ...artifactContext,
+    };
+
+    console.log("Submitting with context:", context);
+    console.log("Agent context:", agentContext);
+    console.log("Artifact context:", artifactContext);
+
+    // Safety check: ensure user_id is present
+    if (!context.user_id) {
+      toast.error("Missing user_id", {
+        description: "Please configure the agent context with a user_id in the settings (⚙️ icon).",
+        duration: 7000,
+      });
+      return;
+    }
 
     stream.submit(
-      { messages: [...toolMessages, newHumanMessage], context },
+      { messages: [...toolMessages, newHumanMessage] },
       {
         streamMode: ["values"],
         streamSubgraphs: true,
         streamResumable: true,
+        context,  // Context goes in config, not in state
         optimisticValues: (prev) => ({
           ...prev,
-          context,
           messages: [
             ...(prev.messages ?? []),
             ...toolMessages,
@@ -325,7 +346,8 @@ export function Thread() {
                   </Button>
                 )}
               </div>
-              <div className="absolute top-2 right-4 flex items-center">
+              <div className="absolute top-2 right-4 flex items-center gap-2">
+                <AgentContextManager />
                 <OpenGitHubRepo />
               </div>
             </div>
