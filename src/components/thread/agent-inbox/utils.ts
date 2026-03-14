@@ -43,7 +43,7 @@ export function baseMessageObject(item: unknown): string {
     } else if ("_getType" in item) {
       return `${item._getType()}:${contentText ? ` ${contentText}` : ""}${toolCallText ? ` - Tool calls: ${toolCallText}` : ""}`;
     }
-  } else if (
+  } else if ( 
     typeof item === "object" &&
     item &&
     "type" in item &&

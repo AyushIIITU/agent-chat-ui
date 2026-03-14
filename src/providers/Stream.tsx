@@ -26,7 +26,7 @@ import { getApiKey } from "@/lib/api-key";
 import { useThreads } from "./Thread";
 import { toast } from "sonner";
 
-export type StateType = { messages: Message[]; ui?: UIMessage[] };
+export type StateType = { messages: Message[]; ui?: UIMessage[]; role?: string };
 
 const useTypedStream = useStream<
   StateType,
@@ -35,6 +35,7 @@ const useTypedStream = useStream<
       messages?: Message[] | Message | string;
       ui?: (UIMessage | RemoveUIMessage)[] | UIMessage | RemoveUIMessage;
       context?: Record<string, unknown>;
+      role?: string;
     };
     CustomEventType: UIMessage | RemoveUIMessage;
   }
@@ -88,6 +89,14 @@ const StreamSession = ({
 }) => {
   const [threadId, setThreadId] = useQueryState("threadId");
   const { getThreads, setThreads } = useThreads();
+
+  console.log("[DEBUG StreamSession] Init params:", {
+    apiUrl,
+    assistantId,
+    threadId,
+    hasApiKey: !!apiKey,
+  });
+
   const streamValue = useTypedStream({
     apiUrl,
     apiKey: apiKey ?? undefined,
@@ -95,6 +104,7 @@ const StreamSession = ({
     threadId: threadId ?? null,
     fetchStateHistory: true,
     onCustomEvent: (event, options) => {
+      console.log("[DEBUG StreamSession] onCustomEvent:", event);
       if (isUIMessage(event) || isRemoveUIMessage(event)) {
         options.mutate((prev) => {
           const ui = uiMessageReducer(prev.ui ?? [], event);
@@ -103,15 +113,83 @@ const StreamSession = ({
       }
     },
     onThreadId: (id) => {
+      console.log("[DEBUG StreamSession] onThreadId — new thread created:", id);
       setThreadId(id);
       // Refetch threads list when thread ID changes.
       // Wait for some seconds before fetching so we're able to get the new thread that was created.
       sleep().then(() => getThreads().then(setThreads).catch(console.error));
     },
+    onError: (error: unknown) => {
+      console.error("[DEBUG StreamSession] onError — stream error:", error);
+    },
   });
 
+  // ─── Fetch interceptor: logs every HTTP request/response to the LangGraph API ───
   useEffect(() => {
+    const originalFetch = window.fetch.bind(window);
+
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+
+      const isLangGraphCall = url.startsWith(apiUrl);
+
+      if (isLangGraphCall) {
+        let parsedBody: unknown = "(no body)";
+        try {
+          if (init?.body) {
+            parsedBody = JSON.parse(init.body as string);
+          }
+        } catch {
+          parsedBody = init?.body ?? "(no body)";
+        }
+
+        console.group(`[DEBUG API →] ${init?.method ?? "GET"} ${url}`);
+        console.log("Headers:", init?.headers ?? {});
+        console.log("Body:", JSON.stringify(parsedBody, null, 2));
+        console.groupEnd();
+      }
+
+      const response = await originalFetch(input, init);
+
+      if (isLangGraphCall) {
+        console.group(`[DEBUG API ←] ${response.status} ${response.statusText} — ${url}`);
+        if (!response.ok) {
+          // Clone so the SDK can still read the body
+          const cloned = response.clone();
+          cloned.text().then((text) => {
+            console.error("Error response body:", text);
+          });
+        }
+        console.groupEnd();
+      }
+
+      return response;
+    };
+
+    return () => {
+      window.fetch = originalFetch;
+    };
+  }, [apiUrl]);
+  // ────────────────────────────────────────────────────────────────────────────────
+
+  // Log stream state on every change
+  useEffect(() => {
+    console.log("[DEBUG StreamSession] Stream state changed:", {
+      isLoading: streamValue.isLoading,
+      error: streamValue.error,
+      messageCount: streamValue.messages?.length ?? 0,
+    });
+  }, [streamValue.isLoading, streamValue.error, streamValue.messages]);
+
+  useEffect(() => {
+    console.log("[DEBUG StreamSession] Checking server at:", apiUrl);
     checkGraphStatus(apiUrl, apiKey).then((ok) => {
+      console.log("[DEBUG StreamSession] Server reachable:", ok);
       if (!ok) {
         toast.error("Failed to connect to LangGraph server", {
           description: () => (
@@ -147,6 +225,11 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
   const envAssistantId: string | undefined =
     process.env.NEXT_PUBLIC_ASSISTANT_ID;
 
+  console.log("[DEBUG StreamProvider] Env vars:", {
+    NEXT_PUBLIC_API_URL: envApiUrl ?? "(not set)",
+    NEXT_PUBLIC_ASSISTANT_ID: envAssistantId ?? "(not set)",
+  });
+
   // Use URL params with env var fallbacks
   const [apiUrl, setApiUrl] = useQueryState("apiUrl", {
     defaultValue: envApiUrl || "",
@@ -179,6 +262,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
   );
 
   const updateAgentContext = (context: Record<string, unknown>) => {
+    console.log("[DEBUG StreamProvider] Saving agentContext:", context);
     window.localStorage.setItem("lg:chat:agentContext", JSON.stringify(context));
     setAgentContext(context);
   };
@@ -186,6 +270,15 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
   // Determine final values to use, prioritizing URL params then env vars
   const finalApiUrl = apiUrl || envApiUrl;
   const finalAssistantId = assistantId || envAssistantId;
+
+  console.log("[DEBUG StreamProvider] Final resolved values:", {
+    apiUrl,
+    finalApiUrl,
+    assistantId,
+    finalAssistantId,
+    agentContextKeys: Object.keys(agentContext),
+    hasUserId: !!(agentContext as Record<string, unknown>).user_id,
+  });
 
   // Show the form if we: don't have an API URL, or don't have an assistant ID
   if (!finalApiUrl || !finalAssistantId) {
@@ -229,7 +322,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
                 }
               }
               
-              // Validate required field - user_id is ALWAYS required
+              // Validate required fields
               if (!parsedContext.user_id) {
                 toast.error("Missing required field", {
                   description: "The 'user_id' field is required in the agent context.",
@@ -238,10 +331,18 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
                 return;
               }
               
+              if (!parsedContext.user_name) {
+                toast.error("Missing required field", {
+                  description: "The 'user_name' field is required in the agent context.",
+                  duration: 5000,
+                });
+                return;
+              }
+              
               // Validate role if provided
-              if (parsedContext.role && parsedContext.role !== "user" && parsedContext.role !== "admin") {
+              if (parsedContext.role && parsedContext.role !== "user" && parsedContext.role !== "trainer") {
                 toast.error("Invalid role value", {
-                  description: "The 'role' field must be either 'user' or 'admin'.",
+                  description: "The 'role' field must be either 'user' or 'trainer'.",
                   duration: 5000,
                 });
                 return;
@@ -314,21 +415,24 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
               </Label>
               <p className="text-muted-foreground text-sm">
                 Provide static runtime context as JSON. This context will be
-                passed to your agent on every invocation. Required field:
-                <code className="mx-1 rounded bg-muted px-1 py-0.5">user_id</code>.
+                passed to your agent on every invocation. Required fields:
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">user_id</code>,
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">user_name</code>.
                 Optional fields:
                 <code className="mx-1 rounded bg-muted px-1 py-0.5">model</code>,
-                <code className="mx-1 rounded bg-muted px-1 py-0.5">role</code> ("user" or "admin")
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">role</code> ("user" or "trainer"),
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">trainer_id</code>,
+                <code className="mx-1 rounded bg-muted px-1 py-0.5">trainer_name</code>
               </p>
               <Textarea
                 id="agentContext"
                 name="agentContext"
                 className="bg-background font-mono text-sm"
-                placeholder='{"user_id": "user_123", "model": "gpt-4o-mini", "role": "user"}'
+                placeholder='{"user_id": "user_123", "user_name": "John Doe", "model": "gpt-4o-mini", "role": "user", "trainer_id": "trainer_456", "trainer_name": "Jane Smith"}'
                 defaultValue={
                   Object.keys(agentContext).length > 0
                     ? JSON.stringify(agentContext, null, 2)
-                    : '{"user_id": ""}'
+                    : '{"user_id": "", "user_name": ""}'
                 }
                 rows={5}
                 required

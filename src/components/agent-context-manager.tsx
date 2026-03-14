@@ -14,12 +14,23 @@ import {
 import { Settings } from "lucide-react";
 import { toast } from "sonner";
 
-export function AgentContextManager() {
+interface AgentContextManagerProps {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}
+
+export function AgentContextManager({ open, onOpenChange }: AgentContextManagerProps) {
   const { agentContext, setAgentContext } = useAgentContext();
   const [contextInput, setContextInput] = useState(
     JSON.stringify(agentContext, null, 2)
   );
-  const [isOpen, setIsOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+
+  const isOpen = open !== undefined ? open : internalOpen;
+  const setIsOpen = (val: boolean) => {
+    setInternalOpen(val);
+    onOpenChange?.(val);
+  };
 
   const handleSave = () => {
     try {
@@ -27,7 +38,7 @@ export function AgentContextManager() {
         ? JSON.parse(contextInput)
         : {};
       
-      // Validate required field - user_id is ALWAYS required
+      // Validate required fields
       if (!parsed.user_id) {
         toast.error("Missing required field", {
           description: "The 'user_id' field is required in the context.",
@@ -36,10 +47,9 @@ export function AgentContextManager() {
         return;
       }
       
-      // Validate role if provided
-      if (parsed.role && parsed.role !== "user" && parsed.role !== "admin") {
-        toast.error("Invalid role value", {
-          description: "The 'role' field must be either 'user' or 'admin'.",
+      if (!parsed.user_name) {
+        toast.error("Missing required field", {
+          description: "The 'user_name' field is required in the context.",
           duration: 5000,
         });
         return;
@@ -85,10 +95,17 @@ export function AgentContextManager() {
                 <span className="text-red-500 ml-1">*</span> - User identifier (required)
               </li>
               <li>
+                <code className="rounded bg-background px-1 py-0.5">user_name</code>
+                <span className="text-red-500 ml-1">*</span> - User name (required)
+              </li>
+              <li>
                 <code className="rounded bg-background px-1 py-0.5">model</code> - LLM model name (optional, default: gpt-4o-mini)
               </li>
               <li>
-                <code className="rounded bg-background px-1 py-0.5">role</code> - User role: "user" or "admin" (optional, default: user)
+                <code className="rounded bg-background px-1 py-0.5">trainer_id</code> - Trainer identifier (optional)
+              </li>
+              <li>
+                <code className="rounded bg-background px-1 py-0.5">trainer_name</code> - Trainer name (optional)
               </li>
             </ul>
           </div>
@@ -102,7 +119,7 @@ export function AgentContextManager() {
               value={contextInput}
               onChange={(e) => setContextInput(e.target.value)}
               className="font-mono text-sm min-h-[240px]"
-              placeholder='{\n  "user_id": "user_123",\n  "model": "gpt-4o",\n  "role": "admin"\n}'
+              placeholder='{\n  "user_id": "user_123",\n  "user_name": "John Doe",\n  "model": "gpt-4o",\n  "trainer_id": "trainer_456",\n  "trainer_name": "Jane Smith"\n}'
             />
           </div>
           <div className="flex gap-2">

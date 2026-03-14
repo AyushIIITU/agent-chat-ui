@@ -1,4 +1,3 @@
-import { v4 as uuidv4 } from "uuid";
 import { ReactNode, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
@@ -128,6 +127,9 @@ export function Thread() {
     "hideToolCalls",
     parseAsBoolean.withDefault(false),
   );
+  const [role, setRole] = useQueryState("role", {
+    defaultValue: "user",
+  });
   const [input, setInput] = useState("");
   const {
     contentBlocks,
@@ -144,6 +146,7 @@ export function Thread() {
 
   const stream = useStreamContext();
   const { agentContext } = useAgentContext();
+  const [contextManagerOpen, setContextManagerOpen] = useState(false);
   const messages = stream.messages;
   const isLoading = stream.isLoading;
 
@@ -187,6 +190,16 @@ export function Thread() {
 
   // TODO: this should be part of the useStream hook
   const prevMessageLength = useRef(0);
+
+  // Debug: watch stream state changes
+  useEffect(() => {
+    console.log("[DEBUG Thread] Stream state:", {
+      isLoading: stream.isLoading,
+      error: stream.error,
+      messageCount: messages.length,
+    });
+  }, [stream.isLoading, stream.error, messages.length]);
+
   useEffect(() => {
     if (
       messages.length !== prevMessageLength.current &&
@@ -201,47 +214,71 @@ export function Thread() {
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if ((input.trim().length === 0 && contentBlocks.length === 0) || isLoading)
+    console.log("[DEBUG handleSubmit] Called. input:", JSON.stringify(input), "isLoading:", isLoading);
+
+    if ((input.trim().length === 0 && contentBlocks.length === 0) || isLoading) {
+      console.log("[DEBUG handleSubmit] BLOCKED — empty input or already loading.");
       return;
+    }
     setFirstTokenReceived(false);
 
     const newHumanMessage: Message = {
-      id: uuidv4(),
       type: "human",
-      content: [
-        ...(input.trim().length > 0 ? [{ type: "text", text: input }] : []),
-        ...contentBlocks,
-      ] as Message["content"],
+      // Use plain string content when there are no file attachments — this
+      // matches what persona_graph expects: { "content": "...", "type": "human" }
+      // Only fall back to the content-block array when files are attached.
+      content: (contentBlocks.length > 0
+        ? [
+            ...(input.trim().length > 0 ? [{ type: "text", text: input }] : []),
+            ...contentBlocks,
+          ]
+        : input.trim()) as Message["content"],
     };
 
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
 
-    // Merge agent context with artifact context
-    const context = {
+    // context goes to the agent's runtime config (user_id, user_name, model, etc.)
+    // role is a state field — it goes in the input alongside messages
+    const context: Record<string, unknown> = {
       ...agentContext,
       ...artifactContext,
     };
 
-    console.log("Submitting with context:", context);
-    console.log("Agent context:", agentContext);
-    console.log("Artifact context:", artifactContext);
+    console.log("[DEBUG handleSubmit] Full context being sent:", JSON.stringify(context, null, 2));
+    console.log("[DEBUG handleSubmit] agentContext:", JSON.stringify(agentContext, null, 2));
+    console.log("[DEBUG handleSubmit] role (state field):", role);
+    console.log("[DEBUG handleSubmit] newHumanMessage:", JSON.stringify(newHumanMessage, null, 2));
+    console.log("[DEBUG handleSubmit] toolMessages count:", toolMessages.length);
 
     // Safety check: ensure user_id is present
     if (!context.user_id) {
+      console.warn("[DEBUG handleSubmit] BLOCKED — user_id missing from context. Opening settings.");
+      setContextManagerOpen(true);
       toast.error("Missing user_id", {
-        description: "Please configure the agent context with a user_id in the settings (⚙️ icon).",
-        duration: 7000,
+        description: "Please configure the agent context with a user_id. The settings panel has been opened for you.",
+        duration: 5000,
       });
       return;
     }
 
-    stream.submit(
-      { messages: [...toolMessages, newHumanMessage] },
+    // role is a state-level field — sent inside input alongside messages
+    const submitPayload = { messages: [...toolMessages, newHumanMessage], role };
+
+    console.log("[DEBUG handleSubmit] Calling stream.submit with payload:", JSON.stringify(submitPayload, null, 2));
+    console.log("[DEBUG handleSubmit] stream.submit options:", JSON.stringify({
+      streamMode: ["values"],
+      streamSubgraphs: true,
+      streamResumable: true,
+      context,
+    }, null, 2));
+
+    const submitPromise = stream.submit(
+      submitPayload,
       {
         streamMode: ["values"],
         streamSubgraphs: true,
         streamResumable: true,
-        context,  // Context goes in config, not in state
+        context,
         optimisticValues: (prev) => ({
           ...prev,
           messages: [
@@ -252,6 +289,14 @@ export function Thread() {
         }),
       },
     );
+
+    submitPromise
+      .then(() => {
+        console.log("[DEBUG handleSubmit] stream.submit promise RESOLVED (stream completed).");
+      })
+      .catch((err: unknown) => {
+        console.error("[DEBUG handleSubmit] stream.submit promise REJECTED:", err);
+      });
 
     setInput("");
     setContentBlocks([]);
@@ -347,7 +392,10 @@ export function Thread() {
                 )}
               </div>
               <div className="absolute top-2 right-4 flex items-center gap-2">
-                <AgentContextManager />
+                <AgentContextManager
+                  open={contextManagerOpen}
+                  onOpenChange={setContextManagerOpen}
+                />
                 <OpenGitHubRepo />
               </div>
             </div>
@@ -396,6 +444,10 @@ export function Thread() {
                 <div className="flex items-center">
                   <OpenGitHubRepo />
                 </div>
+                <AgentContextManager
+                  open={contextManagerOpen}
+                  onOpenChange={setContextManagerOpen}
+                />
                 <TooltipIconButton
                   size="lg"
                   className="p-4"
@@ -520,6 +572,20 @@ export function Thread() {
                               Hide Tool Calls
                             </Label>
                           </div>
+                        </div>
+                        <div>
+                          <Label htmlFor="role-select" className="text-sm text-gray-600 mr-2">
+                            Role:
+                          </Label>
+                          <select
+                            id="role-select"
+                            value={role}
+                            onChange={(e) => setRole(e.target.value)}
+                            className="rounded border border-gray-300 bg-white px-2 py-1 text-sm text-gray-600"
+                          >
+                            <option value="user">User</option>
+                            <option value="trainer">Trainer</option>
+                          </select>
                         </div>
                         <Label
                           htmlFor="file-input"
